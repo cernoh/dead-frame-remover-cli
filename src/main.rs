@@ -26,6 +26,20 @@ fn collect_files(path: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn generate_hash(input_file: &str) -> String {
+    let output = Command::new(ffmpeg_executable)
+        .args(&["-i", "input.mp4", "-f", "hash", "-hash", "sha256", "-"])
+        .output()
+        .expect("Failed to run ffmpeg");
+
+    if output.status.success() {
+        String::from_utf8_lossy(&output.stdout).to_string()
+    } else {
+        eprintln!("Error: {}", String::from_utf8_lossy(&output.stderr));
+        "ERROR".to_string()
+    }
+}
+
 fn generate_frames(input_file: &str) -> String {
     let input_path = Path::new(input_file);
     let stem = input_path
@@ -44,7 +58,14 @@ fn generate_frames(input_file: &str) -> String {
 
     let output_pattern = format!("{}/frame_%04d.png", stem);
 
-    Command::new("resources/ffmpeg.exe")
+    // Determine the ffmpeg executable based on the OS
+    let ffmpeg_executable = if cfg!(target_os = "windows") {
+        "resources/ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+
+    Command::new(ffmpeg_executable)
         .args(&["-i", input_file, &output_pattern])
         .output()
         .expect("Failed to execute ffmpeg");
@@ -53,7 +74,14 @@ fn generate_frames(input_file: &str) -> String {
 }
 
 fn compare_images_ssim(image1: &str, image2: &str) -> f32 {
-    let output = Command::new("ffmpeg")
+    // Determine the ffmpeg executable based on the OS
+    let ffmpeg_executable = if cfg!(target_os = "windows") {
+        "resources/ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+
+    let output = Command::new(ffmpeg_executable)
         .arg("-i")
         .arg(image1)
         .arg("-i")
@@ -102,7 +130,10 @@ fn main() {
             continue;
         }
 
-        let ssim_val = compare_images_ssim(value, frames_vec[index - 1]);
-        if ssim_val > 0.9 {}
+        let ssim_val = compare_images_ssim(
+            value.to_str().unwrap(),
+            frames_vec[index - 1].to_str().unwrap(),
+        );
+        if ssim_val > 0.98 {}
     }
 }
