@@ -1,8 +1,11 @@
-{pkgs ? import <nixpkgs> {}}:
-with pkgs;
-  mkShell {
-    buildInputs = [
-      cargo
-      rustc
-    ];
-  }
+let
+  pkgs = import <nixpkgs> { };
+in
+pkgs.mkShell {
+  buildInputs = with pkgs; [
+    pkg-config
+    cargo
+    rustup
+    cmake
+  ];
+}
