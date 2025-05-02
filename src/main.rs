@@ -1,18 +1,63 @@
+use once_cell::sync::Lazy;
 use std::env;
 use std::fs;
+use std::fs::File;
+use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
-
+use std::sync::Arc;
+use std::sync::Mutex;
 use tempfile::tempdir;
+use tokio::sync::Semaphore;
 
-// Determine the ffmpeg executable based on the OS
-const FFMPEG_EXECUTABLE: &str = if cfg!(target_os = "windows") {
-    "resources/ffmpeg.exe"
+const FFMPEG_EXECUTABLE: &[u8] = if cfg!(target_os = "windows") {
+    include_bytes!("resources/ffmpeg-windows.zst")
+} else if cfg!(target_os = "macos") {
+    include_bytes!("resources/ffmpeg-mac.zst")
+} else if cfg!(target_os = "linux") {
+    include_bytes!("resources/ffmpeg-linux.zst")
 } else {
-    "resources/ffmpeg"
+    include_bytes!("resources/ffmpeg-linux.zst")
 };
+
+static FFMPEG_PATH: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+fn extract_ffmpeg() -> std::io::Result<String> {
+    use zstd::stream::read::Decoder;
+    let temp_dir = env::temp_dir();
+    let ffmpeg_path = temp_dir.join("ffmpeg");
+
+    let compressed = Cursor::new(FFMPEG_EXECUTABLE);
+    let mut decoder = Decoder::new(compressed)?;
+    let mut out = File::create(&ffmpeg_path)?;
+    std::io::copy(&mut decoder, &mut out)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = out.metadata()?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&ffmpeg_path, perms)?;
+    }
+
+    Ok(ffmpeg_path.to_string_lossy().into_owned())
+}
+
+fn get_ffmpeg_path() -> String {
+    let mut cached = FFMPEG_PATH.lock().unwrap();
+    if cached.is_none() {
+        match extract_ffmpeg() {
+            Ok(path) => *cached = Some(path),
+            Err(e) => {
+                eprintln!("Failed to extract ffmpeg!  :{}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+    cached.clone().unwrap()
+}
 
 fn collect_files(path: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -36,9 +81,11 @@ fn collect_files(path: &Path) -> Vec<PathBuf> {
 }
 
 fn stitch_frames_into_video(folder: &str, output_file: &str) {
+    let ffmpeg_path = get_ffmpeg_path();
+
     let input_pattern = format!("{}/frame_%04d.png", folder);
 
-    let status = Command::new(FFMPEG_EXECUTABLE)
+    let status = Command::new(ffmpeg_path)
         .args(&[
             "-framerate",
             "30",
@@ -58,27 +105,14 @@ fn stitch_frames_into_video(folder: &str, output_file: &str) {
     }
 }
 
-fn generate_hash(input_file: &str) -> String {
-    let output = Command::new(FFMPEG_EXECUTABLE)
-        .args(&["-i", "input.mp4", "-f", "hash", "-hash", "sha256", "-"])
-        .output()
-        .expect("Failed to run ffmpeg");
-
-    if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).to_string()
-    } else {
-        eprintln!("Error: {}", String::from_utf8_lossy(&output.stderr));
-        "ERROR".to_string()
-    }
-}
-
 fn generate_frames(input_file: &str) -> (String, tempfile::TempDir) {
     let temp_dir = tempdir().expect("Failed to create temp directory");
     let output_pattern = temp_dir.path().join("frame_%04d.png");
+    let ffmpeg_path = get_ffmpeg_path();
 
     let output_pattern_str = output_pattern.to_str().unwrap();
 
-    Command::new(FFMPEG_EXECUTABLE)
+    Command::new(ffmpeg_path)
         .args(&["-i", input_file, output_pattern_str])
         .output()
         .expect("Failed to execute ffmpeg");
@@ -95,7 +129,7 @@ fn generate_frames(input_file: &str) -> (String, tempfile::TempDir) {
 }
 
 fn compare_images_ssim(image1: &str, image2: &str) -> f32 {
-    let output = Command::new(FFMPEG_EXECUTABLE)
+    let output = Command::new(get_ffmpeg_path())
         .arg("-i")
         .arg(image1)
         .arg("-i")
@@ -125,7 +159,8 @@ fn compare_images_ssim(image1: &str, image2: &str) -> f32 {
     0.0
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: {} <video_file>", args[0]);
@@ -138,21 +173,32 @@ fn main() {
 
     let frames_vec: Vec<PathBuf> = collect_files(Path::new(&frames_folder));
 
-    let mut bad_frames: Vec<bool> = Vec::new();
+    let semaphore = Arc::new(Semaphore::new(4));
+
+    let mut handles = Vec::new();
 
     for index in 0..frames_vec.len() - 1 {
-        let ssim_val = compare_images_ssim(
-            frames_vec[index].to_str().unwrap(),
-            frames_vec[index + 1].to_str().unwrap(),
-        );
+        let image1 = frames_vec[index].clone();
+        let image2 = frames_vec[index + 1].clone();
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
 
-        if ssim_val > 0.98 {
-            bad_frames.push(true);
-        } else {
-            bad_frames.push(false);
-        }
+        let handle = tokio::spawn(async move {
+            let _permit = permit;
+            let score = compare_images_ssim(&image1.to_string_lossy(), &image2.to_string_lossy());
+            score > 0.95
+        });
+
+        handles.push(handle);
     }
 
+    let mut bad_frames: Vec<bool> = Vec::new();
+
+    for handle in handles {
+        match handle.await {
+            Ok(result) => bad_frames.push(result),
+            Err(_) => bad_frames.push(false),
+        }
+    }
     bad_frames.push(false);
 
     for (index, value) in frames_vec.iter().enumerate() {

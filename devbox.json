@@ -3,7 +3,8 @@
   "packages": [
     "rustup@latest",
     "cargo@latest",
-    "libiconv@latest"
+    "libiconv@latest",
+    "zstd@latest"
   ],
   "shell": {
     "init_hook": [

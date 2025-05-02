@@ -136,6 +136,106 @@
           "store_path": "/nix/store/dl3rjwl31d31qkga5i7nnygvbcyxpfn3-rustup-1.27.1"
         }
       }
+    },
+    "zstd@latest": {
+      "last_modified": "2025-04-13T09:22:33Z",
+      "resolved": "github:NixOS/nixpkgs/18dd725c29603f582cf1900e0d25f9f1063dbf11#zstd",
+      "source": "devbox-search",
+      "version": "1.5.6",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "bin",
+              "path": "/nix/store/ca1a67wk2njwqkfrja5nx3g0jjq0r377-zstd-1.5.6-bin",
+              "default": true
+            },
+            {
+              "name": "man",
+              "path": "/nix/store/vaqyzp0yg4wlabc71x9z9yavv23psi9g-zstd-1.5.6-man",
+              "default": true
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/wlzbg2y095lyv2w2lxck06s7h8hi98sf-zstd-1.5.6-dev"
+            },
+            {
+              "name": "out",
+              "path": "/nix/store/5y1liddmw4zrackzdby0zjsvwgmgpmhg-zstd-1.5.6"
+            }
+          ],
+          "store_path": "/nix/store/ca1a67wk2njwqkfrja5nx3g0jjq0r377-zstd-1.5.6-bin"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "bin",
+              "path": "/nix/store/9ppglczmkx9b3zqavyjaskga1w6fmbci-zstd-1.5.6-bin",
+              "default": true
+            },
+            {
+              "name": "man",
+              "path": "/nix/store/jym6i69av0qixs0j65hjsidhczyv7aba-zstd-1.5.6-man",
+              "default": true
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/cb211kdiniiqp1l0f8gizwsv73899p4h-zstd-1.5.6-dev"
+            },
+            {
+              "name": "out",
+              "path": "/nix/store/g9rabl8vm0nknap31gax829x90b8pp9f-zstd-1.5.6"
+            }
+          ],
+          "store_path": "/nix/store/9ppglczmkx9b3zqavyjaskga1w6fmbci-zstd-1.5.6-bin"
+        },
+        "x86_64-darwin": {
+          "outputs": [
+            {
+              "name": "bin",
+              "path": "/nix/store/6cf9b5561ma6z2pq8swscqdf6dsacsn4-zstd-1.5.6-bin",
+              "default": true
+            },
+            {
+              "name": "man",
+              "path": "/nix/store/psmy5dxjb6qy5dki9cvdk43mfmirlgp9-zstd-1.5.6-man",
+              "default": true
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/qrxhpsq10sl8m3cbi0316b878k47rbc4-zstd-1.5.6-dev"
+            },
+            {
+              "name": "out",
+              "path": "/nix/store/wdkmm8jhfvwdx65mmrd6q43f22lmlmyn-zstd-1.5.6"
+            }
+          ],
+          "store_path": "/nix/store/6cf9b5561ma6z2pq8swscqdf6dsacsn4-zstd-1.5.6-bin"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "bin",
+              "path": "/nix/store/kacmz3l42i1xckn537ifkwsfc7fg2w6f-zstd-1.5.6-bin",
+              "default": true
+            },
+            {
+              "name": "man",
+              "path": "/nix/store/hcp1syhg79dwlp66pbsvn4hmws97yrdr-zstd-1.5.6-man",
+              "default": true
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/fl5grbix1q35xw27wcq2wfnchlczwbyf-zstd-1.5.6-dev"
+            },
+            {
+              "name": "out",
+              "path": "/nix/store/wy0slah6yvchgra8nhp6vgrqa6ay72cq-zstd-1.5.6"
+            }
+          ],
+          "store_path": "/nix/store/kacmz3l42i1xckn537ifkwsfc7fg2w6f-zstd-1.5.6-bin"
+        }
+      }
     }
   }
 }
