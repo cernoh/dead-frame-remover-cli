@@ -1,50 +1,29 @@
-name: Cross-Platform Rust Release
+# .github/workflows/release.yml
 
 on:
-  push:
-    tags:
-      - 'v*'  # Trigger only on version tags
+  release:
+    types: [created]
 
 jobs:
-  build:
-    name: Build for ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+  release:
+    name: release ${{ matrix.target }}
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            ext: ""
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            ext: ""
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            ext: .exe
-
+          - target: x86_64-pc-windows-gnu
+            archive: zip
+          - target: x86_64-unknown-linux-musl
+            archive: tar.gz tar.xz tar.zst
+          - target: x86_64-apple-darwin
+            archive: zip
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust target
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          target: ${{ matrix.target }}
-          override: true
-
-      - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Upload release asset
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            target/${{ matrix.target }}/release/dead-frames-remover${{ matrix.ext }}
+      - uses: actions/checkout@master
+      - name: Compile and release
+        uses: rust-build/rust-build.action@v1.4.5
         env:
-           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-
-
-
-
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          RUSTTARGET: ${{ matrix.target }}
+          ARCHIVE_TYPES: ${{ matrix.archive }}
