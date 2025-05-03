@@ -26,11 +26,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Rust
-        uses: actions/setup-rust@v1
+      - name: Install Rust target
+        uses: actions-rs/toolchain@v1
         with:
-          rust-version: stable
-          targets: ${{ matrix.target }}
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
 
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }}
@@ -41,4 +42,9 @@ jobs:
           files: |
             target/${{ matrix.target }}/release/dead-frames-remover${{ matrix.ext }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+
+
+
