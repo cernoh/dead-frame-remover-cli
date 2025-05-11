@@ -1,4 +1,6 @@
+use image;
 use once_cell::sync::Lazy;
+use rayon::prelude::*;
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -10,7 +12,6 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tempfile::tempdir;
-use tokio::sync::Semaphore;
 
 const FFMPEG_EXECUTABLE: &[u8] = if cfg!(target_os = "windows") {
     include_bytes!("resources/ffmpeg-windows.zst")
@@ -24,6 +25,7 @@ const FFMPEG_EXECUTABLE: &[u8] = if cfg!(target_os = "windows") {
 
 static FFMPEG_PATH: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 
+//TODO: add gpu prcoesssing to ffmpeg
 fn extract_ffmpeg() -> std::io::Result<String> {
     use zstd::stream::read::Decoder;
     let temp_dir = env::temp_dir();
@@ -60,24 +62,43 @@ fn get_ffmpeg_path() -> String {
 }
 
 fn collect_files(path: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(ext) = path.extension() {
-                    if ext == "png" {
-                        files.push(path);
-                    }
-                }
-            } else if path.is_dir() {
-                files.extend(collect_files(&path));
-            }
-        }
+    if !path.exists() {
+        return Vec::new();
     }
 
-    files
+    if path.is_file() {
+        if let Some(ext) = path.extension() {
+            if ext == "png" {
+                return vec![path.to_path_buf()];
+            }
+        }
+        return Vec::new();
+    }
+
+    match fs::read_dir(path) {
+        Ok(entries) => {
+            entries
+                .par_bridge() // Convert to parallel iterator
+                .flat_map(|entry| {
+                    if let Ok(entry) = entry {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            collect_files(&path)
+                        } else if path.is_file()
+                            && path.extension().map_or(false, |ext| ext == "png")
+                        {
+                            vec![path]
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    }
 }
 
 fn stitch_frames_into_video(folder: &str, output_file: &str) {
@@ -93,6 +114,10 @@ fn stitch_frames_into_video(folder: &str, output_file: &str) {
             &input_pattern,
             "-c:v",
             "libx264",
+            "-preset",
+            "fast",
+            "-threads",
+            "0",
             "-pix_fmt",
             "yuv420p",
             output_file,
@@ -114,6 +139,7 @@ fn generate_frames(input_file: &str) -> (String, tempfile::TempDir) {
 
     Command::new(ffmpeg_path)
         .args(&["-i", input_file, output_pattern_str])
+        .args(["-threads", "0"])
         .output()
         .expect("Failed to execute ffmpeg");
 
@@ -128,7 +154,7 @@ fn generate_frames(input_file: &str) -> (String, tempfile::TempDir) {
     )
 }
 
-fn compare_images_ssim(image1: &str, image2: &str) -> f32 {
+fn compare_images_ssim_ffmpeg(image1: &str, image2: &str) -> f32 {
     let output = Command::new(get_ffmpeg_path())
         .arg("-i")
         .arg(image1)
@@ -159,61 +185,151 @@ fn compare_images_ssim(image1: &str, image2: &str) -> f32 {
     0.0
 }
 
-#[tokio::main]
-async fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Usage: {} <video_file>", args[0]);
-        std::process::exit(1);
+fn compare_images_ssim_crate(
+    image1: &str,
+    image2: &str,
+) -> Result<f32, Box<dyn std::error::Error>> {
+    let image1 = image::open(image1).map_err(|e| format!("Failed to open first image: {}", e))?;
+    let image2 = image::open(image2).map_err(|e| format!("Failed to open second image: {}", e))?;
+
+    let grey1 = image1.to_luma8();
+    let grey2 = image2.to_luma8();
+
+    if grey1.dimensions() != grey2.dimensions() {
+        return Err("images are different dimensions".into());
     }
 
-    let input_file = &args[1];
+    let (width, height) = grey1.dimensions();
 
+    let ssim_sum: f32 = (0..height)
+        .into_par_iter()
+        .map(|y| {
+            let k1 = 0.01;
+            let k2 = 0.03;
+            let l = 255.0;
+            let c1 = (k1 * l as f32).powi(2);
+            let c2 = (k2 * l as f32).powi(2);
+
+            let mut row_sum = 0.0;
+            for x in 0..width {
+                let p1 = grey1.get_pixel(x, y)[0] as f32;
+                let p2 = grey2.get_pixel(x, y)[0] as f32;
+
+                //means
+                let mu1 = p1;
+                let mu2 = p2;
+
+                //variance and covariance
+                let sigma1_sq = (p1 - mu1).powi(2);
+                let sigma2_sq = (p2 - mu2).powi(2);
+                let sigma12 = (p1 - mu1) * (p2 - mu2);
+
+                //calculate ssim
+                let num = (2.0 * mu1 * mu2 + c1) * (2.0 * sigma12 + c2);
+                let den = (mu1.powi(2) + mu2.powi(2) + c1) * (sigma1_sq + sigma2_sq + c2);
+                row_sum += num / den;
+            }
+            row_sum
+        })
+        .sum();
+
+    let ssim = ssim_sum / ((width * height) as f32);
+    Ok(ssim)
+}
+
+pub async fn process_video(input_file: &str, output_directory: &str) -> Result<String, String> {
+    println!("Starting video processing...");
+    println!("Generating frames from input video: {}", input_file);
     let (frames_folder, _temp_dir) = generate_frames(input_file);
 
+    println!("Collecting frames from: {}", frames_folder);
     let frames_vec: Vec<PathBuf> = collect_files(Path::new(&frames_folder));
+    println!("Found {} frames to process", frames_vec.len());
 
-    let semaphore = Arc::new(Semaphore::new(4));
+    // Define batch size for comparing frames
+    let batch_size = 10; // Adjust this based on your system's capabilities
+    println!("Processing frames in batches of {}", batch_size);
+    let bad_frames = Arc::new(Mutex::new(Vec::with_capacity(frames_vec.len())));
 
-    let mut handles = Vec::new();
+    println!("Starting frame comparison...");
+    // Process frames in batches
+    frames_vec.par_chunks(batch_size).for_each(|chunk| {
+        // Local vector to store results for this batch
+        let mut local_results = Vec::with_capacity(chunk.len());
 
-    for index in 0..frames_vec.len() - 1 {
-        let image1 = frames_vec[index].clone();
-        let image2 = frames_vec[index + 1].clone();
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
-
-        let handle = tokio::spawn(async move {
-            let _permit = permit;
-            let score = compare_images_ssim(&image1.to_string_lossy(), &image2.to_string_lossy());
-            score > 0.95
-        });
-
-        handles.push(handle);
-    }
-
-    let mut bad_frames: Vec<bool> = Vec::new();
-
-    for handle in handles {
-        match handle.await {
-            Ok(result) => bad_frames.push(result),
-            Err(_) => bad_frames.push(false),
+        // Compare each frame with the next one within this batch
+        for i in 0..chunk.len().saturating_sub(1) {
+            let image1 = &chunk[i];
+            let image2 = &chunk[i + 1];
+            let score =
+                compare_images_ssim_crate(&image1.to_string_lossy(), &image2.to_string_lossy())
+                    .unwrap_or(0.0);
+            local_results.push(score > 0.95);
         }
+
+        // Last frame in batch can't be compared within batch
+        if !chunk.is_empty() && chunk.len() < batch_size {
+            local_results.push(false);
+        }
+
+        // Add local results to overall results
+        let mut bad_frames_guard = bad_frames.lock().unwrap();
+        bad_frames_guard.extend(local_results);
+    });
+
+    let mut bad_frames = bad_frames.lock().unwrap();
+    // Ensure we have a result for each frame (except the last one)
+    if frames_vec.is_empty() {
+        return Err("No frames to process".to_string());
     }
+    while bad_frames.len() < frames_vec.len() {
+        bad_frames.push(false);
+    }
+    // Add false for the last frame
     bad_frames.push(false);
 
+    println!("Removing duplicate frames...");
+    // Remove bad frames
+    let mut removed_count = 0;
     for (index, value) in frames_vec.iter().enumerate() {
         if bad_frames[index] {
-            match fs::remove_file(value) {
-                Ok(_) => println!("removed dead frame"),
-                Err(e) => eprintln!("failed to delete file {}", e),
+            if let Err(e) = fs::remove_file(value) {
+                eprintln!("Failed to remove file {}: {}", value.display(), e);
+            } else {
+                removed_count += 1;
             }
         }
     }
 
+    println!("Removed {} duplicate frames", removed_count);
+
+    println!("Stitching frames back into video...");
     let output_video = format!(
-        "{}_processed.mp4",
+        "{}/{}_processed.mp4",
+        output_directory,
         Path::new(input_file).file_stem().unwrap().to_str().unwrap()
     );
     stitch_frames_into_video(&frames_folder, &output_video);
-    println!("Video created: {}", output_video);
+
+    println!("Video processing complete!");
+    Ok(output_video)
+}
+
+#[tokio::main]
+async fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 3 {
+        eprintln!("Usage: {} <video_file> <output_directory>", args[0]);
+        std::process::exit(1);
+    }
+
+    let input_file = &args[1];
+    let output_dir = &args[2];
+
+    let output_vid: Result<String, String> = process_video(input_file, output_dir).await;
+
+    match output_vid {
+        Ok(path) => println!("Video created: {}", path),
+        Err(e) => eprintln!("error creating video: {}", e),
+    }
 }
