@@ -45,7 +45,7 @@ fn detect_hw_acceleration() -> Option<HWAccel> {
     let encoders = String::from_utf8_lossy(&encoders.stdout);
 
     // Check for different hardware acceleration options
-    let hw_configs = vec![
+    let hw_configs: Vec<(&str, Vec<&str>, Vec<&str>, fn(&str, &str) -> bool)> = vec![
         // NVIDIA CUDA/NVENC
         (
             "cuda",
