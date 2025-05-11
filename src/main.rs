@@ -24,6 +24,86 @@ const FFMPEG_EXECUTABLE: &[u8] = if cfg!(target_os = "windows") {
 };
 
 static FFMPEG_PATH: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+static HW_ACCEL: Lazy<Mutex<Option<HWAccel>>> = Lazy::new(|| Mutex::new(None));
+
+#[derive(Clone, Debug)]
+struct HWAccel {
+    name: String,
+    decoder: Vec<String>,
+    encoder: Vec<String>,
+}
+
+fn detect_hw_acceleration() -> Option<HWAccel> {
+    let ffmpeg = get_ffmpeg_path();
+
+    // Get available hardware accelerators
+    let hwaccels = Command::new(&ffmpeg).args(["-hwaccels"]).output().ok()?;
+    let hwaccels = String::from_utf8_lossy(&hwaccels.stdout);
+
+    // Get available encoders
+    let encoders = Command::new(&ffmpeg).args(["-encoders"]).output().ok()?;
+    let encoders = String::from_utf8_lossy(&encoders.stdout);
+
+    // Check for different hardware acceleration options
+    let hw_configs = vec![
+        // NVIDIA CUDA/NVENC
+        (
+            "cuda",
+            vec!["cuda"],
+            vec!["h264_nvenc", "-preset", "p4", "-tune", "hq"],
+            |hw: &str, enc: &str| hw.contains("cuda") && enc.contains("h264_nvenc"),
+        ),
+        // Apple VideoToolbox
+        (
+            "videotoolbox",
+            vec!["videotoolbox"],
+            vec!["h264_videotoolbox"],
+            |hw: &str, enc: &str| hw.contains("videotoolbox") && enc.contains("h264_videotoolbox"),
+        ),
+        // Intel QSV
+        (
+            "qsv",
+            vec!["qsv"],
+            vec!["h264_qsv"],
+            |hw: &str, enc: &str| hw.contains("qsv") && enc.contains("h264_qsv"),
+        ),
+        // VA-API
+        (
+            "vaapi",
+            vec!["vaapi", "-vaapi_device", "/dev/dri/renderD128"],
+            vec![
+                "-vaapi_device",
+                "/dev/dri/renderD128",
+                "-vf",
+                "format=nv12,hwupload",
+                "-c:v",
+                "h264_vaapi",
+            ],
+            |hw: &str, enc: &str| hw.contains("vaapi") && enc.contains("h264_vaapi"),
+        ),
+    ];
+
+    // Find the first supported hardware acceleration
+    for (name, decoder, encoder, validator) in hw_configs {
+        if validator(&hwaccels, &encoders) {
+            return Some(HWAccel {
+                name: name.to_string(),
+                decoder: decoder.into_iter().map(String::from).collect(),
+                encoder: encoder.into_iter().map(String::from).collect(),
+            });
+        }
+    }
+
+    None
+}
+
+fn get_hw_accel() -> Option<HWAccel> {
+    let mut cached = HW_ACCEL.lock().unwrap();
+    if cached.is_none() {
+        *cached = detect_hw_acceleration();
+    }
+    cached.clone()
+}
 
 //TODO: add gpu prcoesssing to ffmpeg
 fn extract_ffmpeg() -> std::io::Result<String> {
@@ -103,25 +183,38 @@ fn collect_files(path: &Path) -> Vec<PathBuf> {
 
 fn stitch_frames_into_video(folder: &str, output_file: &str) {
     let ffmpeg_path = get_ffmpeg_path();
-
     let input_pattern = format!("{}/frame_%04d.png", folder);
 
+    let mut command_args = vec![
+        "-framerate".to_string(),
+        "30".to_string(),
+        "-i".to_string(),
+        input_pattern,
+    ];
+
+    // Add hardware encoding arguments if available
+    if let Some(hw) = get_hw_accel() {
+        command_args.extend(hw.encoder.iter().cloned());
+    } else {
+        // Fallback to CPU encoding
+        command_args.extend(vec![
+            "-c:v".to_string(),
+            "libx264".to_string(),
+            "-preset".to_string(),
+            "fast".to_string(),
+        ]);
+    }
+
+    command_args.extend(vec![
+        "-threads".to_string(),
+        "0".to_string(),
+        "-pix_fmt".to_string(),
+        "yuv420p".to_string(),
+        output_file.to_string(),
+    ]);
+
     let status = Command::new(ffmpeg_path)
-        .args(&[
-            "-framerate",
-            "30",
-            "-i",
-            &input_pattern,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-threads",
-            "0",
-            "-pix_fmt",
-            "yuv420p",
-            output_file,
-        ])
+        .args(command_args)
         .status()
         .expect("Failed to stitch frames into video");
 
@@ -134,12 +227,25 @@ fn generate_frames(input_file: &str) -> (String, tempfile::TempDir) {
     let temp_dir = tempdir().expect("Failed to create temp directory");
     let output_pattern = temp_dir.path().join("frame_%04d.png");
     let ffmpeg_path = get_ffmpeg_path();
-
     let output_pattern_str = output_pattern.to_str().unwrap();
 
+    let mut command_args = Vec::new();
+
+    // Add hardware decoding arguments if available
+    if let Some(hw) = get_hw_accel() {
+        command_args.extend(hw.decoder.iter().cloned());
+    }
+
+    command_args.extend(vec![
+        "-i".to_string(),
+        input_file.to_string(),
+        "-threads".to_string(),
+        "0".to_string(),
+        output_pattern_str.to_string(),
+    ]);
+
     Command::new(ffmpeg_path)
-        .args(&["-i", input_file, output_pattern_str])
-        .args(["-threads", "0"])
+        .args(command_args)
         .output()
         .expect("Failed to execute ffmpeg");
 
@@ -247,7 +353,7 @@ pub async fn process_video(input_file: &str, output_directory: &str) -> Result<S
     println!("Found {} frames to process", frames_vec.len());
 
     // Define batch size for comparing frames
-    let batch_size = 10; // Adjust this based on your system's capabilities
+    let batch_size = 20; // Adjust this based on your system's capabilities
     println!("Processing frames in batches of {}", batch_size);
     let bad_frames = Arc::new(Mutex::new(Vec::with_capacity(frames_vec.len())));
 
