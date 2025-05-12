@@ -1,4 +1,3 @@
-use image;
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
 use std::env;
@@ -23,7 +22,10 @@ const FFMPEG_EXECUTABLE: &[u8] = if cfg!(target_os = "windows") {
     include_bytes!("resources/ffmpeg-linux.zst")
 };
 
-static FFMPEG_PATH: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+const SSIM_SCORE: f32 = 0.90;
+
+static FFMPEG_PATH: Lazy<Mutex<String>> =
+    Lazy::new(|| Mutex::new(find_ffmpeg().expect("FFmpeg not found")));
 static HW_ACCEL: Lazy<Mutex<Option<HWAccel>>> = Lazy::new(|| Mutex::new(None));
 
 #[derive(Clone, Debug)]
@@ -97,6 +99,20 @@ fn detect_hw_acceleration() -> Option<HWAccel> {
     None
 }
 
+fn find_ffmpeg() -> Option<String> {
+    let command = if cfg!(target_os = "windows") {
+        Command::new("where").arg("ffmpeg.exe").output().ok()?
+    } else {
+        Command::new("which").arg("ffmpeg").output().ok()?
+    };
+
+    if command.status.success() {
+        let path = String::from_utf8_lossy(&command.stdout).trim().to_string();
+        Some(path)
+    } else {
+        None
+    }
+}
 fn get_hw_accel() -> Option<HWAccel> {
     let mut cached = HW_ACCEL.lock().unwrap();
     if cached.is_none() {
@@ -129,16 +145,17 @@ fn extract_ffmpeg() -> std::io::Result<String> {
 
 fn get_ffmpeg_path() -> String {
     let mut cached = FFMPEG_PATH.lock().unwrap();
-    if cached.is_none() {
+    if cached.is_empty() {
+        println!("No system ffmpeg found, extracting bundled version...");
         match extract_ffmpeg() {
-            Ok(path) => *cached = Some(path),
+            Ok(path) => *cached = path,
             Err(e) => {
-                eprintln!("Failed to extract ffmpeg!  :{}", e);
+                eprintln!("Failed to extract ffmpeg: {}", e);
                 std::process::exit(1);
             }
         }
     }
-    cached.clone().unwrap()
+    cached.clone()
 }
 
 fn collect_files(path: &Path) -> Vec<PathBuf> {
@@ -146,37 +163,35 @@ fn collect_files(path: &Path) -> Vec<PathBuf> {
         return Vec::new();
     }
 
+    // Fast path for single file
     if path.is_file() {
-        if let Some(ext) = path.extension() {
-            if ext == "png" {
-                return vec![path.to_path_buf()];
-            }
-        }
-        return Vec::new();
+        return match path.extension() {
+            Some(ext) if ext == "png" => vec![path.to_path_buf()],
+            _ => Vec::new(),
+        };
     }
 
+    // Directory handling
     match fs::read_dir(path) {
-        Ok(entries) => {
-            entries
-                .par_bridge() // Convert to parallel iterator
-                .flat_map(|entry| {
-                    if let Ok(entry) = entry {
-                        let path = entry.path();
-                        if path.is_dir() {
-                            collect_files(&path)
-                        } else if path.is_file()
-                            && path.extension().map_or(false, |ext| ext == "png")
-                        {
-                            vec![path]
-                        } else {
-                            Vec::new()
+        Ok(entries) => entries
+            .par_bridge()
+            .filter_map(|entry| {
+                entry.ok().and_then(|e| {
+                    let path = e.path();
+                    match path.is_dir() {
+                        true => Some(collect_files(&path)),
+                        false => {
+                            if path.extension().is_some_and(|ext| ext == "png") {
+                                Some(vec![path])
+                            } else {
+                                None
+                            }
                         }
-                    } else {
-                        Vec::new()
                     }
                 })
-                .collect()
-        }
+            })
+            .flatten()
+            .collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -370,7 +385,7 @@ pub async fn process_video(input_file: &str, output_directory: &str) -> Result<S
             let score =
                 compare_images_ssim_crate(&image1.to_string_lossy(), &image2.to_string_lossy())
                     .unwrap_or(0.0);
-            local_results.push(score > 0.95);
+            local_results.push(score > SSIM_SCORE);
         }
 
         // Last frame in batch can't be compared within batch
@@ -438,4 +453,4 @@ async fn main() {
         Ok(path) => println!("Video created: {}", path),
         Err(e) => eprintln!("error creating video: {}", e),
     }
-}
+}Some
