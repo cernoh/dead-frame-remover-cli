@@ -453,4 +453,4 @@ async fn main() {
         Ok(path) => println!("Video created: {}", path),
         Err(e) => eprintln!("error creating video: {}", e),
     }
-}Some
+}
